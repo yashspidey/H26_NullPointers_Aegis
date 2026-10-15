@@ -1,12 +1,20 @@
 """CLI entry point for RepoRescue-AI."""
 
 import json
+import asyncio
 from pathlib import Path
 from datetime import datetime
 import click
 
 from .inspection import inspect_repository
 from .analysis import analyze_repository, MaintenanceFinding
+
+# Optional Cognee integration
+try:
+    from .cognee_memory import store_capsule_in_cognee, query_repo_memory
+    COGNEE_AVAILABLE = True
+except ImportError:
+    COGNEE_AVAILABLE = False
 
 
 @click.group()
@@ -32,7 +40,8 @@ def inspect(path: Path, as_json: bool):
 @click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path))
 @click.option("--output", "-o", type=click.Path(path_type=Path), help="Output capsule to file")
 @click.option("--no-ai", is_flag=True, help="Skip AI analysis (static findings only)")
-def analyze(path: Path, output: Path | None, no_ai: bool):
+@click.option("--cognee-store", is_flag=True, help="Store analysis in Cognee knowledge graph")
+def analyze(path: Path, output: Path | None, no_ai: bool, cognee_store: bool):
     """Analyze a repository and generate Dependency Exit Capsule."""
     # Run full analysis
     result = analyze_repository(str(path), ai_analysis=None if no_ai else {})
@@ -59,6 +68,19 @@ def analyze(path: Path, output: Path | None, no_ai: bool):
     
     # Print summary to console
     _print_findings(findings)
+
+    # Optionally store in Cognee
+    if cognee_store and COGNEE_AVAILABLE:
+        click.echo("\nStoring analysis in Cognee knowledge graph...")
+        doc_id = asyncio.run(store_capsule_in_cognee(
+            repo_path=str(path),
+            capsule_path=output or default_name,
+            inspection=inspection,
+            findings=[f.to_dict() for f in findings],
+        ))
+        click.echo(f"Stored in Cognee with doc ID: {doc_id}")
+    elif cognee_store and not COGNEE_AVAILABLE:
+        click.echo("\nCognee not available. Install with: pip install cognee", err=True)
 
 
 def _print_inspection(result: dict):
@@ -184,6 +206,67 @@ def generate_capsule(inspection: dict, findings: list[MaintenanceFinding]) -> st
     lines.append("- Test execution not performed in static mode; use --no-ai for pure static analysis")
     
     return "\n".join(lines)
+
+
+@cli.command()
+@click.argument("repo_url", type=str)
+@click.argument("question", type=str)
+@click.option("--limit", "-l", type=int, default=5, help="Max results to return")
+def cognee_query(repo_url: str, question: str, limit: int):
+    """Query Cognee knowledge graph for historical repo context.
+
+    Examples:
+      re-rescue cognee-query https://github.com/user/repo "What dependency issues were found?"
+      re-rescue cognee-query https://github.com/user/repo "Show me critical findings"
+    """
+    if not COGNEE_AVAILABLE:
+        click.echo("Cognee not available. Install with: pip install cognee", err=True)
+        return
+
+    click.echo(f"Querying Cognee for: {repo_url}")
+    click.echo(f"Question: {question}")
+
+    results = asyncio.run(query_repo_memory(repo_url, question))
+
+    if not results:
+        click.echo("No relevant history found.")
+        return
+
+    click.echo(f"\nFound {len(results)} relevant memories:")
+    for i, r in enumerate(results[:limit], 1):
+        meta = r.get("metadata", {})
+        content = r.get("content", "")[:300]
+        click.echo(f"\n{i}. {meta.get('timestamp', 'unknown')} - {meta.get('repo_url', 'unknown')}")
+        click.echo(f"   {content}...")
+
+
+@cli.command()
+@click.option("--repo-url", type=str, help="Filter by repository URL")
+def cognee_insights(repo_url: str | None):
+    """Show cross-repository insights from Cognee knowledge graph."""
+    if not COGNEE_AVAILABLE:
+        click.echo("Cognee not available. Install with: pip install cognee", err=True)
+        return
+
+    from .cognee_memory import CogneeMemory
+
+    async def run():
+        memory = CogneeMemory()
+        try:
+            insights = await memory.get_cross_repo_insights()
+            click.echo("\n=== Cross-Repository Insights ===")
+            click.echo(f"Total analyses: {insights['total_analyses']}")
+            click.echo(f"Unique repositories: {insights['unique_repos']}")
+            click.echo(f"\nTop finding categories:")
+            for cat, count in insights['top_categories']:
+                click.echo(f"  {cat}: {count}")
+            click.echo(f"\nSeverity distribution:")
+            for sev, count in insights['severity_distribution'].items():
+                click.echo(f"  {sev}: {count}")
+        finally:
+            await memory.close()
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

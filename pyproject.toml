@@ -15,7 +15,17 @@ dependencies = [
     "rich",
     "requests",
     "toml",
+    "pyyaml",
+    "tomli",
+    "packaging",
+    "gitpython",
 ]
 
+[project.optional-dependencies]
+cognee = ["cognee"]
+kestra = []  # Kestra runs as external orchestrator; no Python deps needed
+streamlit = ["streamlit>=1.30"]
+all = ["cognee", "streamlit"]
+
 [project.scripts]
-re-rescue = "reporescure.cli:cli"
+re-rescue = "reporescue.cli:cli"

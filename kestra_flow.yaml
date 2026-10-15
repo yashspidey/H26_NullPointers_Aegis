@@ -1,0 +1,192 @@
+# Kestra Flow: RepoRescue-AI Scheduled Analysis
+# Orchestrates repository inspection → analysis → capsule generation
+# Can run on schedule, webhook, or manual trigger
+
+id: reporescue-ai-analysis
+namespace: hackathon.reporescue
+description: |
+  Automated repository maintenance analysis using RepoRescue-AI.
+  Generates Dependency Exit Capsules with evidence-based findings.
+
+inputs:
+  - id: repo_url
+    type: STRING
+    description: Git repository URL to analyze
+    required: true
+    defaults: "https://github.com/rishrek/LinkWatch"
+  - id: branch
+    type: STRING
+    description: Branch to analyze
+    required: false
+    defaults: "main"
+  - id: run_ai_analysis
+    type: BOOLEAN
+    description: Whether to run AI analysis via Hermes (requires local model)
+    required: false
+    defaults: false
+  - id: notify_on_findings
+    type: BOOLEAN
+    description: Send notification if findings detected
+    required: false
+    defaults: true
+
+variables:
+  workdir: "{{ workingDir }}/repo"
+  capsule_dir: "{{ workingDir }}/capsules"
+  timestamp: "{{ execution.startDate | date: 'yyyyMMdd_HHmmss' }}"
+
+tasks:
+  # 1. Clone the repository
+  - id: clone_repo
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: Clone target repository
+    workingDirectory: "{{ workingDir }}"
+    runner: DOCKER
+    docker:
+      image: alpine/git:latest
+    commands:
+      - git clone --depth 1 --branch {{ inputs.branch }} {{ inputs.repo_url }} repo
+      - echo "Cloned to {{ workdir }}"
+
+  # 2. Install RepoRescue-AI
+  - id: install_reporescue
+    type: io.kestra.plugin.scripts.python.Script
+    description: Install RepoRescue-AI from source
+    workingDirectory: "{{ workdir }}"
+    runner: DOCKER
+    docker:
+      image: python:3.12-slim
+    beforeCommands:
+      - pip install -e .
+    warningOnStdErr: false
+
+  # 3. Run static inspection (fast, no AI required)
+  - id: inspect
+    type: io.kestra.plugin.scripts.python.Script
+    description: Run static repository inspection
+    workingDirectory: "{{ workdir }}"
+    runner: DOCKER
+    docker:
+      image: python:3.12-slim
+    beforeCommands:
+      - pip install -e .
+    commands:
+      - re-rescue inspect . --json > inspection_{{ timestamp }}.json
+      - cat inspection_{{ timestamp }}.json
+    outputFiles:
+      - inspection_{{ timestamp }}.json
+
+  # 4. Run full analysis + generate capsule
+  - id: analyze
+    type: io.kestra.plugin.scripts.python.Script
+    description: Run full analysis and generate Dependency Exit Capsule
+    workingDirectory: "{{ workdir }}"
+    runner: DOCKER
+    docker:
+      image: python:3.12-slim
+    beforeCommands:
+      - pip install -e .
+    commands:
+      - |
+        if {{ inputs.run_ai_analysis }}; then
+          re-rescue analyze . --output {{ capsule_dir }}/capsule_{{ timestamp }}.md
+        else
+          re-rescue analyze . --no-ai --output {{ capsule_dir }}/capsule_{{ timestamp }}.md
+        fi
+      - cat {{ capsule_dir }}/capsule_{{ timestamp }}.md
+    outputFiles:
+      - "{{ capsule_dir }}/capsule_{{ timestamp }}.md"
+
+  # 5. Store results in Cognee knowledge graph (optional)
+  - id: store_in_cognee
+    type: io.kestra.plugin.scripts.python.Script
+    description: Store analysis results in Cognee for memory/persistence
+    workingDirectory: "{{ workdir }}"
+    runner: DOCKER
+    docker:
+      image: python:3.12-slim
+    beforeCommands:
+      - pip install -e . cognee
+    commands:
+      - |
+        python -c "
+        import json
+        import asyncio
+        from cognee import Cognee
+        
+        async def store():
+            cognee = Cognee()
+            await cognee.initialize()
+            
+            # Load inspection and capsule
+            with open('inspection_{{ timestamp }}.json') as f:
+                inspection = json.load(f)
+            with open('{{ capsule_dir }}/capsule_{{ timestamp }}.md') as f:
+                capsule = f.read()
+            
+            # Store in knowledge graph
+            await cognee.add(
+                content=capsule,
+                metadata={
+                    'repo_url': '{{ inputs.repo_url }}',
+                    'branch': '{{ inputs.branch }}',
+                    'commit': inspection.get('commit'),
+                    'timestamp': '{{ timestamp }}',
+                    'findings_count': inspection.get('summary', {}).get('total_findings', 0)
+                }
+            )
+            print('Stored in Cognee knowledge graph')
+        
+        asyncio.run(store())
+        "
+    warningOnStdErr: false
+
+  # 6. Notify on findings (Slack, email, webhook)
+  - id: notify
+    type: io.kestra.plugin.notifications.slack.SlackIncomingWebhook
+    description: Post summary to Slack if findings detected
+    condition: "{{ outputs.analyze.outputFiles['capsule_{{ timestamp }}.md'] != null && inputs.notify_on_findings }}"
+    webhookUrl: "{{ secret('SLACK_WEBHOOK_URL') }}"
+    payload: |
+      {
+        "text": "🔍 RepoRescue-AI Analysis Complete",
+        "blocks": [
+          {"type": "header", "text": {"type": "plain_text", "text": "🔍 RepoRescue-AI Analysis Complete"}},
+          {"type": "section", "fields": [
+            {"type": "mrkdwn", "text": "*Repository:*\n{{ inputs.repo_url }}"},
+            {"type": "mrkdwn", "text": "*Branch:*\n{{ inputs.branch }}"},
+            {"type": "mrkdwn", "text": "*Commit:*\n{{ outputs.clone_repo.outputs.stdout | regex: '([a-f0-9]{40})' | first }}"},
+            {"type": "mrkdwn", "text": "*Findings:*\n{{ outputs.inspect.outputFiles['inspection_{{ timestamp }}.json'] | read | jsonpath: '$.summary.total_findings' }}"}
+          ]},
+          {"type": "section", "text": {"type": "mrkdwn", "text": "📄 <{{ outputs.analyze.outputFiles['capsule_{{ timestamp }}.md'] | uri }}|View Dependency Exit Capsule>"}}
+        ]
+      }
+
+  # 7. Archive capsule as artifact
+  - id: archive_capsule
+    type: io.kestra.core.tasks.flows.WorkingDirectory
+    description: Archive capsule for download
+    tasks:
+      - id: upload
+        type: io.kestra.plugin.core.storage.Put
+        from: "{{ capsule_dir }}/capsule_{{ timestamp }}.md"
+        to: "capsules/capsule_{{ inputs.repo_url | replace: '/', '_' }}_{{ timestamp }}.md"
+
+# Triggers
+triggers:
+  - id: daily_schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 2 * * *"  # Daily at 2 AM UTC
+    inputs:
+      repo_url: "https://github.com/rishrek/LinkWatch"
+      run_ai_analysis: false
+
+  - id: manual_trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    path: reporescue/analyze
+
+# Retry policy for transient failures
+retry:
+  attempts: 3
+  delay: 30s
+  exponentialBackoff: 2.0

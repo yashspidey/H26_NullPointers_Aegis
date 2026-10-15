@@ -79,7 +79,9 @@ re-rescue analyze C:\path\to\LinkWatch
 | `src/reporescue/inspection.py` | Git repo detection, manifest parsing, file discovery |
 | `src/reporescue/analysis.py` | Finding detection, evidence collection, AI prompt building |
 | `src/reporescue/cli.py` | CLI commands, capsule generation |
+| `src/reporescue/cognee_memory.py` | Cognee knowledge graph integration |
 | `skills/repo-maintenance/SKILL.md` | Hermes Agent Skill (Agent Skills Open Standard) |
+| `kestra_flow.yaml` | Kestra workflow orchestration |
 
 ## LinkWatch Analysis (Demo Results)
 
@@ -149,6 +151,8 @@ RepoRescue-AI/
 | `tomli` | TOML parsing (pyproject.toml) |
 | `packaging` | Version comparison |
 | `gitpython` | Git repo inspection |
+| `cognee` | Knowledge graph memory (optional: `pip install -e .[cognee]`) |
+| `kestra` | Workflow orchestration (external service, no Python dep) |
 
 ## Limitations
 
@@ -162,6 +166,63 @@ RepoRescue-AI/
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
+## Integrations
+
+### Kestra Workflow Orchestration
+
+RepoRescue-AI includes a **Kestra flow** (`kestra_flow.yaml`) that orchestrates the full analysis pipeline:
+
+- **Scheduled runs** — Daily/weekly analysis of target repos
+- **Webhook triggers** — Analyze on PR merge, release, or custom events
+- **Retries & error handling** — Automatic retry with exponential backoff
+- **Artifacts** — Capsules stored as downloadable artifacts
+- **Notifications** — Slack/email/webhook on findings
+- **Cognee integration** — Optional step to store results in knowledge graph
+
+**Deploy to Kestra:**
+```bash
+# Via Kestra UI: Flows → Import → kestra_flow.yaml
+# Or via API:
+curl -X POST http://localhost:8080/api/v1/flows/import \
+  -F "file=@kestra_flow.yaml"
+```
+
+**Trigger manually:**
+```bash
+curl -X POST http://localhost:8080/api/v1/executions/webhook/hackathon.reporescue.reporescue-ai-analysis \
+  -H "Content-Type: application/json" \
+  -d '{"repo_url": "https://github.com/your/repo", "run_ai_analysis": true}'
+```
+
+### Cognee Knowledge Graph Memory
+
+RepoRescue-AI can store analyses in **Cognee** for persistent, queryable memory:
+
+```bash
+# Install with Cognee support
+pip install -e .[cognee]
+
+# Run analysis and store in Cognee
+re-rescue analyze /path/to/repo --cognee-store
+
+# Query historical context
+re-rescue cognee-query https://github.com/user/repo "What dependency issues were found?"
+
+# Get cross-repo insights
+re-rescue cognee-insights
+```
+
+**What gets stored:**
+- Full Dependency Exit Capsule (Markdown)
+- Structured findings with severity/category
+- Repo metadata (commit, branch, manifests, file counts)
+- Individual findings as queryable nodes
+
+**Query examples:**
+- `"Show me all critical findings for this repo"`
+- `"Has pydantic version been a problem before?"`
+- `"What are the most common dependency issues across all my repos?"`
 
 ## Hackathon Submission Checklist
 
